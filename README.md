@@ -55,9 +55,11 @@ Read every file and list what you would not ship. Then fix it.
    reachable, 503 otherwise and during shutdown). `@nestjs/terminus` is a good fit.
 6. **Graceful shutdown**: `app.enableShutdownHooks()` and make sure that on `SIGTERM` the server
    stops accepting connections, in-flight requests finish (the 2 s `/tasks/export/slow` must still
-   answer 200), **then** Prisma/Redis disconnect, and the process exits 0. Hint: look at the order
-   in which Nest calls `onModuleDestroy`, `beforeApplicationShutdown`, `onApplicationShutdown` and
-   closes the HTTP server. Where should Prisma disconnect?
+   answer 200), **then** Prisma/Redis disconnect, and the process exits cleanly. Hint: look at the
+   order in which Nest calls `onModuleDestroy`, `beforeApplicationShutdown`, `onApplicationShutdown`
+   and closes the HTTP server. Where should Prisma disconnect? (Nest re-raises the signal after
+   `app.close()`, so the process ends with exit code 143 — Kubernetes treats that as a normal
+   termination. Exiting 0 yourself is also fine.)
 7. **Shared rate limit** in Redis so two replicas enforce the same limit.
 8. **Container**: multi-stage `Dockerfile` (prod deps only, non-root user, `HEALTHCHECK`) and
    `docker compose up --build --scale api=2` works against the compose Postgres/Redis.
@@ -72,7 +74,7 @@ npm run check:stateless
 ```
 
 - [ ] `check:graceful` all green: 20 in-flight slow requests complete with 200, a new request after
-      SIGTERM is refused or 503, exit code 0 within 10 s, stdout is JSON lines
+      SIGTERM is refused or 503, clean exit within 10 s, stdout is JSON lines
 - [ ] `check:stateless` all green: data created on one replica is visible on the other, unique ids
       under concurrent creates, consistent error shape, rate limit shared across replicas
 - [ ] Starting without `API_TOKEN` fails fast with a clear message

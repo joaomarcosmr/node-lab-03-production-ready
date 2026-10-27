@@ -56,7 +56,10 @@ try {
   const jsonLines = lines.filter((l) => { try { JSON.parse(l); return true; } catch { return false; } });
   results.push([`all ${IN_FLIGHT} in-flight requests completed with 200 (got ${completed})`, completed === IN_FLIGHT]);
   results.push([`new request after SIGTERM was refused or got 503 (got ${JSON.stringify(late)})`, late.refused || late.status === 503]);
-  results.push([`process exited with code 0 within 10s (got ${JSON.stringify(exit)} after ${exitMs}ms)`, exit.code === 0 && !exit.timeout]);
+  // Nest's enableShutdownHooks() re-raises the signal after app.close(), so a clean exit may show
+  // as {signal:"SIGTERM"} (exit code 143) instead of code 0. Both are fine — as long as it drained first.
+  const cleanExit = !exit.timeout && (exit.code === 0 || (exit.signal === 'SIGTERM' && completed === IN_FLIGHT));
+  results.push([`process exited cleanly after draining, within 10s (got ${JSON.stringify(exit)} after ${exitMs}ms)`, cleanExit]);
   results.push([`stdout is JSON lines (${jsonLines.length}/${lines.length} lines parse as JSON)`, lines.length > 0 && jsonLines.length === lines.length]);
 } catch (e) {
   console.error('ERROR:', e.message);
