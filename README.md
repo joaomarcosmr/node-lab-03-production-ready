@@ -1,101 +1,97 @@
-# Node Lab 03 — From "works on my machine" to production-ready
+# Node Lab 03 — From MVP to production-ready (NestJS + Prisma + Postgres + Redis)
 
-> Interview question this lab trains: **"How do you structure and scale a Node.js application in
-> production?"** (architecture, configuration, logging, health checks, graceful shutdown,
-> horizontal scaling, containers)
+> Interview question: **"How do you structure and run a Node.js service in production?"**
+> (configuration, logging, health/readiness, graceful shutdown, horizontal scaling, containers)
 
-`legacy/app.js` is a small Todo API that works, but could never be deployed with two replicas behind
-a load balancer, and it drops requests every time it restarts. Turn it into a service you would be
-comfortable putting on call for.
+## The scenario
+
+The Tasks API started as an MVP and is now being moved to Kubernetes with **two replicas** behind a
+load balancer and rolling deploys. The first attempt went badly: each replica showed different
+tasks, every deploy returned errors to users for a few seconds, the rate limit was "sometimes 100,
+sometimes 200", and the logs were unreadable in Datadog. Prisma and Postgres are already wired up
+(`PrismaModule`, `prisma/schema.prisma`, migration + seed) — nobody got around to using them.
 
 ## Setup
 
 ```bash
 npm install
-docker compose up -d        # Redis for shared state
-npm start                   # the legacy app on :3000
+cp .env.example .env
+npm run db:up          # Postgres on :5443, Redis on :6381
+npm run db:setup       # migration + 3 seeded tasks
+npm run start:dev      # :3000 (hardcoded… that's one of the problems)
 ```
 
-Requires Node 20+, Docker.
+Requires Node 20+ and Docker.
 
-## What is wrong with `legacy/app.js`
+## What you get
 
-Read it first and write down everything you find. You should spot at least: all state in memory
-(todos, id counter, rate-limit counters), a hardcoded secret, `console.log` logging, no input
-validation, inconsistent error responses (`"no"`, HTML 404s, a crash on unknown id in PATCH),
-no graceful shutdown, config hardcoded, a single file with routing + auth + business logic + storage
-mixed together.
+```
+src/main.ts                          no shutdown hooks, hardcoded port, console.log
+src/health.controller.ts             GET /health → "OK" (text). No readiness probe.
+src/common/rate-limit.middleware.ts  in-memory counters per process
+src/common/auth.guard.ts             hardcoded token
+src/tasks/tasks.service.ts           in-memory array (ignores Prisma)
+src/tasks/tasks.controller.ts        no validation, crashes on unknown id, inconsistent responses
+src/prisma/                          PrismaService (disconnects in onModuleDestroy — think about when that runs)
+prisma/schema.prisma                 Task model, migration and seed ready to use
+scripts/graceful-check.mjs           SIGTERM test
+scripts/stateless-check.mjs          two-replica test
+```
+
+Read every file and list what you would not ship. Then fix it.
 
 ## Your task
 
-Build the production version in `src/` (keep `legacy/` untouched for comparison). Same API, but:
-
-### 1. Structure
-- Layers: HTTP (routes/controllers) → service → repository. The repository is the only layer that
-  knows about Redis. Validation at the edge (zod or similar), domain errors in the service.
-- Configuration from environment variables with validation at startup: `PORT`, `API_TOKEN`,
-  `REDIS_URL`, `LOG_LEVEL`, `RATE_LIMIT_PER_MIN` (default 100). Missing `API_TOKEN` → process refuses
-  to start with a clear message.
-- Consistent error contract: every error is `{ "error": { "code": "...", "message": "..." } }` with
-  the right status (400 validation, 401 auth, 404 not found, 429 rate limit, 500 unexpected).
-  Unknown routes also return this shape.
-
-### 2. Observability
-- Structured JSON logs (pino) with one line per request containing: request id, method, path,
-  status, duration ms. Request id is taken from the incoming `x-request-id` header or generated, and
-  echoed back in the response header.
-- `GET /health` (liveness: process is up) and `GET /ready` (readiness: Redis reachable). `/ready` must
-  return 503 when Redis is down and during shutdown.
-
-### 3. Graceful shutdown
-On `SIGTERM`/`SIGINT`: stop accepting new connections, flip `/ready` to 503, let in-flight requests
-finish (up to a timeout, e.g. 10 s), close Redis, exit 0. A forced exit with code 1 if the timeout
-elapses. `npm run check:graceful` verifies this by starting your server, keeping 20 slow requests in
-flight, sending SIGTERM and watching what happens.
-
-### 4. Stateless, horizontally scalable
-Todos, the id sequence and rate-limit counters live in Redis so that N instances behave as one.
-`npm run check:stateless` runs against two instances (start them with `PORT=3001` and `PORT=3002`).
-
-### 5. Containers & process management
-- A multi-stage `Dockerfile` (production deps only, non-root user, `NODE_ENV=production`,
-  `HEALTHCHECK`, `node` as PID 1 or `tini` — explain your choice in `NOTES.md`).
-- `docker compose up --scale app=2` must work. Add the `app` service to `docker-compose.yml`.
-- Bonus: run with `node:cluster` or PM2 in cluster mode and explain in `NOTES.md` when you'd use
-  that versus multiple containers.
+1. **Config**: `PORT`, `API_TOKEN`, `DATABASE_URL`, `REDIS_URL`, `RATE_LIMIT_PER_MIN` (default 100)
+   from the environment (`@nestjs/config` with validation is the idiomatic way). Missing
+   `API_TOKEN` → the process refuses to start with a clear message.
+2. **Persistence**: `TasksService` uses Prisma. Validation with DTOs + `ValidationPipe`
+   (`class-validator`) — `POST /tasks` without a title is a 400, unknown id is a 404.
+3. **Error contract**: a global exception filter so every error is
+   `{ "error": { "code": "...", "message": "..." } }` with the right status (400/401/404/429/500).
+4. **Logging**: structured JSON logs (e.g. `nestjs-pino`), one line per request with request id,
+   method, path, status and duration. No `console.log` left in `src/`.
+5. **Health vs readiness**: `GET /health` (process alive) and `GET /ready` (Postgres + Redis
+   reachable, 503 otherwise and during shutdown). `@nestjs/terminus` is a good fit.
+6. **Graceful shutdown**: `app.enableShutdownHooks()` and make sure that on `SIGTERM` the server
+   stops accepting connections, in-flight requests finish (the 2 s `/tasks/export/slow` must still
+   answer 200), **then** Prisma/Redis disconnect, and the process exits 0. Hint: look at the order
+   in which Nest calls `onModuleDestroy`, `beforeApplicationShutdown`, `onApplicationShutdown` and
+   closes the HTTP server. Where should Prisma disconnect?
+7. **Shared rate limit** in Redis so two replicas enforce the same limit.
+8. **Container**: multi-stage `Dockerfile` (prod deps only, non-root user, `HEALTHCHECK`) and
+   `docker compose up --build --scale api=2` works against the compose Postgres/Redis.
 
 ### Acceptance criteria
 
-Set `START_CMD` if your start script differs (default is `npm start`, so point `npm start` at `src/`).
-
 ```bash
-npm run check:graceful                      # starts your app on :3100 with REDIS_URL from env
-PORT=3001 npm start & PORT=3002 npm start & # two instances
+npm run build
+npm run check:graceful                         # starts `node dist/main` on :3100 for you
+PORT=3001 node dist/main & PORT=3002 node dist/main &
 npm run check:stateless
 ```
 
-- [ ] `npm run check:graceful` all green: 20 in-flight slow requests complete with 200, a new request
-      after SIGTERM is refused or gets 503, process exits with code 0 within 10 s, stdout is JSON lines
-- [ ] `npm run check:stateless` all green: create on A → read on B, update on B → visible on A,
-      40 concurrent creates across both instances produce unique ids, delete on B → 404 on A,
-      error shape consistent, rate limit shared across instances
+- [ ] `check:graceful` all green: 20 in-flight slow requests complete with 200, a new request after
+      SIGTERM is refused or 503, exit code 0 within 10 s, stdout is JSON lines
+- [ ] `check:stateless` all green: data created on one replica is visible on the other, unique ids
+      under concurrent creates, consistent error shape, rate limit shared across replicas
 - [ ] Starting without `API_TOKEN` fails fast with a clear message
-- [ ] `/ready` returns 503 when Redis is stopped (`docker compose stop redis`) and 200 when it's back
-- [ ] `docker compose up --build --scale app=2` starts two healthy replicas
-- [ ] `NOTES.md` has: what was wrong with the legacy app, your folder structure and why, how you'd
-      add a second entity (e.g. "projects") without touching existing files more than necessary
-- [ ] `src/` has no `console.log` and no hardcoded secrets
+- [ ] `/ready` returns 503 when Postgres is stopped (`docker compose stop postgres`) and 200 when back
+- [ ] `docker compose up --build --scale api=2` starts two healthy replicas
+- [ ] `NOTES.md`: what was wrong, your folder layout, the shutdown sequence you implemented and why,
+      and when you would use `cluster`/PM2 instead of more replicas
+- [ ] No `console.log` and no hardcoded secret in `src/`
 
 ### Stretch goals
-- Add an OpenTelemetry trace per request and export to the console or Jaeger.
-- Add a `GET /metrics` Prometheus endpoint with request duration histogram + event-loop lag.
-- Add a `Makefile`/`npm` script that runs the whole check suite in CI (GitHub Actions with a Redis
-  service container).
+
+- OpenTelemetry tracing per request (console exporter is enough), `GET /metrics` for Prometheus.
+- A GitHub Actions workflow that runs both checks with Postgres and Redis service containers.
 
 ## What a senior answer sounds like
 
-Separation of concerns so the business logic is testable without HTTP or Redis; 12-factor config;
-structured logs with correlation ids; liveness vs readiness and why they differ; graceful shutdown
-tied to the orchestrator's lifecycle (SIGTERM → drain → exit) so deploys are zero-downtime; stateless
-processes so scaling is just "add replicas"; small, non-root images; and the difference between
-scaling with cluster (one box) and replicas (many boxes).
+Separate transport (controllers), business logic (services) and persistence (Prisma) so the core is
+testable; 12-factor config; structured logs with correlation ids; liveness ≠ readiness; graceful
+shutdown wired to the orchestrator's lifecycle (SIGTERM → stop accepting → drain → close
+connections → exit 0) so deploys are zero-downtime; stateless processes so scaling is "add
+replicas"; small non-root images; and knowing the difference between scaling a box with `cluster`
+and scaling a fleet with replicas.

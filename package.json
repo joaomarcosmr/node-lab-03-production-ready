@@ -2,15 +2,36 @@
   "name": "node-lab-03-production-ready",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node legacy/app.js",
-    "check:graceful": "node scripts/graceful-check.js",
-    "check:stateless": "node scripts/stateless-check.js",
+    "postinstall": "prisma generate",
+    "build": "nest build",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main",
+    "db:up": "docker compose up -d",
+    "db:setup": "prisma migrate deploy && prisma db seed",
+    "check:graceful": "node scripts/graceful-check.mjs",
+    "check:stateless": "node scripts/stateless-check.mjs",
     "check": "npm run check:graceful && npm run check:stateless"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/core": "^11.2.8",
+    "@nestjs/platform-express": "^11.2.8",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "dotenv": "^17.2.3",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.24",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.15.5",
+    "prisma": "^7.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,4 +1,7 @@
 node_modules/
+dist/
+src/generated/
 *.log
 .env
 .DS_Store
+*.tsbuildinfo
