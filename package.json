@@ -1,0 +1,16 @@
+{
+  "name": "node-lab-03-production-ready",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node legacy/app.js",
+    "check:graceful": "node scripts/graceful-check.js",
+    "check:stateless": "node scripts/stateless-check.js",
+    "check": "npm run check:graceful && npm run check:stateless"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
